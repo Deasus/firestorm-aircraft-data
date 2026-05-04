@@ -19,6 +19,11 @@ on:
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
+# Required so GITHUB_TOKEN can push commits back to the repo.
+# Without this, the commit step succeeds locally but push gets 403.
+permissions:
+  contents: write
+
 jobs:
   update:
     runs-on: ubuntu-latest
