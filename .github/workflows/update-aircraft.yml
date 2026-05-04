@@ -1,0 +1,54 @@
+name: Update Aircraft Data
+
+# Cron: every 5 minutes — GHA's documented minimum schedule interval.
+# Anything lower (*/1, */2, */3) is silently downgraded by GitHub, and we've
+# hit that downgrade in practice. A full 21-region cycle takes ~80s, so 5-min
+# windows leave plenty of headroom for failover retries.
+#
+# 5-min data staleness is fine because the FRONTEND INTERPOLATES positions
+# between polls using (lat, lng, track, gs, elapsed). Even at 5-min lag an
+# aircraft doing 450kt will be projected ~37nm forward by frame time —
+# close to reality since modern jets hold heading + speed for minutes at a
+# time. For the handful of cases where reality diverges (turns, TOD), the
+# next poll snaps back.
+#
+# GHA schedule can still lag 1-5 min during high-load periods — upstream
+# behavior, not a pipeline bug.
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    # Prevent overlapping runs if a previous invocation is still going
+    concurrency:
+      group: update-aircraft
+      cancel-in-progress: false
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Fetch aircraft
+        run: python fetch_aircraft.py
+
+      - name: Commit if changed
+        run: |
+          git config user.name  'firestorm-bot'
+          git config user.email 'firestorm-bot@users.noreply.github.com'
+          git add data/aircraft.json data/aircraft-priority.json
+          # Only commit if files actually changed
+          if git diff --cached --quiet; then
+            echo 'No changes, skipping commit'
+          else
+            git commit -m "aircraft update $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            git push
+          fi
