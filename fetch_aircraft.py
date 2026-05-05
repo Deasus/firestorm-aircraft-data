@@ -33,9 +33,16 @@ import requests
 # max airplanes.live tolerates without noticeable degradation. Coverage:
 # two overlapping 500nm disks blanket CONUS, one for each major landmass.
 REGIONS = [
-    # NA operational priority
-    ('CONUS-West',    40.0, -115.0, 500),
-    ('CONUS-East',    38.0,  -87.0, 500),
+    # NA operational priority — 5-region CONUS grid closes the geometry gap
+    # that 2 overlapping 500nm disks left in the Dakotas / Montana / Texas /
+    # West Texas / SE corridor. N1255A (Air Tractor T-819 over west TX, lat
+    # 33 lng -102) was in that gap with the old 2-region layout. Same grid
+    # used by the frontend live-polling architecture.
+    ('CONUS-West',    38.0, -118.0, 500),
+    ('CONUS-Central', 40.0, -100.0, 500),
+    ('CONUS-East',    38.0,  -82.0, 500),
+    ('CONUS-North',   47.0, -103.0, 500),
+    ('CONUS-South',   30.0,  -96.0, 500),
     ('Alaska',        62.0, -152.0, 500),
     ('Hawaii',        20.5, -157.0, 300),
     # NA adjacent
@@ -135,6 +142,11 @@ def classify(ac: dict) -> str:
     callsign = (ac.get('flight') or '').strip().upper()
     cat = (ac.get('category') or '').upper()
     squawk = (ac.get('squawk') or '').strip()
+    # Owner/operator — airplanes.live ships this when known. Catches air tankers
+    # that broadcast their raw N-number as callsign (e.g. N1255A = T-819 over
+    # west Texas, ownOp = "AIR TRACTOR INC"). Without this we'd miss every
+    # privately-owned tanker not flying with a TANKER### callsign.
+    own_op = (ac.get('ownOp') or '').upper()
 
     # DOI fleet — registration whitelist takes precedence
     if reg and reg in DOI_FLEET_REGS:
@@ -153,6 +165,18 @@ def classify(ac: dict) -> str:
     for rh in FIRE_REG_HINT:
         if rh in reg:
             return 'fire'
+    # Owner/operator-based — air tanker operators that often fly N-number-as-
+    # callsign (no TANKER prefix on broadcast). AIR TRACTOR is an SEAT (Single
+    # Engine Air Tanker) maker; their AT-802AF is THE workhorse SEAT for fed
+    # contracts. NEPTUNE = Neptune Aviation (BAe-146 LATs). TEN TANKER, COULSON,
+    # ERICKSON = LAT operators. AERO-FLITE flies CL-415 amphibious. BRIDGER =
+    # Bridger Aerospace (CL-415 + Twin Otter). DUNCAN AVIATION services Type-2.
+    if own_op:
+        for op in ('AIR TRACTOR', 'NEPTUNE', 'COULSON', 'ERICKSON',
+                   'BRIDGER', 'TEN TANKER', '10 TANKER', 'AERO-FLITE',
+                   'AERO FLITE', 'DAUNTLESS', 'CONAIR'):
+            if op in own_op:
+                return 'fire'
 
     # MEDEVAC — emergency squawks + callsign prefix
     if squawk in ('7500', '7600', '7700'):
@@ -258,6 +282,8 @@ def main() -> int:
                 'track':    ac.get('track'),
                 'squawk':   ac.get('squawk'),
                 'emergency': ac.get('emergency') or 'none',
+                'ownOp':    ac.get('ownOp') or '',
+                'year':     ac.get('year') or '',
                 '_category': classify(ac),
                 '_sourceRegion': name,
             }
