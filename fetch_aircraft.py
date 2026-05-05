@@ -153,12 +153,18 @@ def classify(ac: dict) -> str:
         if callsign.startswith(pfx):
             return 'medevac'
 
-    # MILITARY — DoD hex ranges + callsign
+    # MILITARY — DoD hex ranges + callsign.
+    # Authoritative US DoD ICAO allocation: ADFC00–AFFFFF (precisely defined).
+    # Previous "h3 == 'adf'" caught civilian commercial regs in adf000–adfbff
+    # (notably AAL hex assignments like adf068). Fix: numeric range check.
     if len(hex_id) == 6:
-        h2 = hex_id[:2]
-        h3 = hex_id[:3]
-        if h2 in ('ae', 'af') or h3 == 'adf':
-            return 'military'
+        try:
+            hex_int = int(hex_id, 16)
+            # 0xADFC00 .. 0xAFFFFF is the US DoD block per ICAO/FAA docs
+            if 0xADFC00 <= hex_int <= 0xAFFFFF:
+                return 'military'
+        except ValueError:
+            pass
     for pfx in MIL_PREFIX:
         if callsign.startswith(pfx):
             return 'military'
