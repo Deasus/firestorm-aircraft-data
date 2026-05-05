@@ -73,11 +73,13 @@ HEADERS = {
 
 # ── Classification ────────────────────────────────────────────────────
 FIRE_CALL_PREFIX = [
-    'TANKER', 'T0', 'T1', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'T8', 'T9',
-    'CDF', 'GUARD', 'FIRE', 'AIRAT', 'COPTER', 'BOMBARD', 'LEAD', 'ATGS',
-    'CALFIRE', 'USFS', 'SMOKEY', 'RECON', 'HELO',
+    'TANKER', 'CDF', 'GUARD', 'FIRE', 'AIRAT', 'BOMBARD', 'LEAD', 'ATGS',
+    'CALFIRE', 'USFS', 'SMOKEY',
 ]
 FIRE_REG_HINT = ['USFS', 'CDF', 'BLM', 'CALFIRE', 'N-TANK']
+
+import re
+_T_NUM_RE = re.compile(r'^T\d{2,4}$')
 
 MED_PREFIX = ['LIFE', 'MED', 'STAR', 'MERCY', 'ANGEL', 'GUARDIAN', 'AMBU', 'HEMS', 'TRAUMA']
 
@@ -138,10 +140,16 @@ def classify(ac: dict) -> str:
     if reg and reg in DOI_FLEET_REGS:
         return 'doi'
 
-    # FIRE — callsign prefix or reg hint
+    # FIRE — callsign prefix or reg hint.
+    # T###-style tanker callsigns are gated on US N-reg, because international
+    # registries T7-* (San Marino) and T-* (Bahamas) are private business jets,
+    # not air tankers. Real US tankers fly as N-registered with T### callsign
+    # (e.g. TANKER910 reg N910SS, T7788 reg N7788).
     for pfx in FIRE_CALL_PREFIX:
         if callsign.startswith(pfx):
             return 'fire'
+    if _T_NUM_RE.match(callsign) and reg.startswith('N'):
+        return 'fire'
     for rh in FIRE_REG_HINT:
         if rh in reg:
             return 'fire'
