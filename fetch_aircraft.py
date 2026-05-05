@@ -132,10 +132,40 @@ def _load_doi_fleet():
 DOI_FLEET_REGS = _load_doi_fleet()
 
 
+# ── DOI Contracted Fleet (CWN/EU helicopter contracts) ────────────────
+# Separate from DOI_FLEET_REGS (the OAS gov-owned fleet). These are private
+# operators on standing DOI contracts that activate during fire ops. Tracked
+# as 'contracted' so the operator can filter / ring them distinctly from
+# both gov-owned DOI and generic fire-mission aircraft.
+def _load_contracted_fleet():
+    import os
+    path = os.path.join(os.path.dirname(__file__), 'data', 'contracted_fleet.json')
+    if not os.path.exists(path):
+        return set()
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        regs = set()
+        for ac in data.get('aircraft', []):
+            r = (ac.get('reg') or '').strip().upper()
+            if r:
+                regs.add(r)
+        print(f'[CONTRACTED] loaded {len(regs)} contracted-fleet registrations')
+        return regs
+    except Exception as e:
+        print(f'[CONTRACTED] fleet load failed: {e}')
+        return set()
+
+
+CONTRACTED_FLEET_REGS = _load_contracted_fleet()
+
+
 def classify(ac: dict) -> str:
-    """Return one of: 'doi', 'fire', 'medevac', 'military', 'helo', 'civilian'.
-    DOI is checked FIRST so federal land-management aircraft are flagged
-    even if their callsign would otherwise classify as civilian/fire."""
+    """Return one of: 'doi', 'contracted', 'fire', 'medevac', 'military', 'helo', 'civilian'.
+    DOI gov-owned is checked FIRST. Contracted comes second — both rank above
+    generic 'fire' classification so the operator sees the federal-fleet
+    visualization (rings) for these aircraft even when they're flying a
+    standard fire mission."""
     hex_id = (ac.get('hex') or '').lower()
     reg = (ac.get('r') or '').upper()
     type_code = (ac.get('t') or '').upper()
@@ -148,7 +178,11 @@ def classify(ac: dict) -> str:
     # privately-owned tanker not flying with a TANKER### callsign.
     own_op = (ac.get('ownOp') or '').upper()
 
-    # DOI fleet — registration whitelist takes precedence
+    # DOI Contracted (CWN/EU helicopter operators) — second whitelist
+    if reg and reg in CONTRACTED_FLEET_REGS:
+        return 'contracted'
+
+    # DOI gov-owned fleet — registration whitelist takes precedence
     if reg and reg in DOI_FLEET_REGS:
         return 'doi'
 
@@ -293,7 +327,7 @@ def main() -> int:
     elapsed = time.time() - start
 
     # Summary counts per our category
-    cat_counts = {'doi': 0, 'fire': 0, 'military': 0, 'medevac': 0, 'helo': 0, 'civilian': 0}
+    cat_counts = {'doi': 0, 'contracted': 0, 'fire': 0, 'military': 0, 'medevac': 0, 'helo': 0, 'civilian': 0}
     for entry in registry.values():
         cat_counts[entry['_category']] = cat_counts.get(entry['_category'], 0) + 1
 
