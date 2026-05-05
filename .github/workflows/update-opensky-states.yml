@@ -1,0 +1,50 @@
+name: Update OpenSky States
+
+# Cron: every 30 minutes. OpenSky /states/all costs 4 credits per call.
+# 48 calls/day = 192 credits/day = 5% of the 4000-credit daily budget.
+# Output is a global state-vector snapshot the frontend can merge with
+# airplanes.live data to widen coverage (OpenSky has ~5K feeders vs
+# airplanes.live's ~3K — measurable gain in EU + Asia).
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: opensky-states
+      cancel-in-progress: false
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Fetch OpenSky states
+        env:
+          OPENSKY_CLIENT_ID:     ${{ secrets.OPENSKY_CLIENT_ID }}
+          OPENSKY_CLIENT_SECRET: ${{ secrets.OPENSKY_CLIENT_SECRET }}
+        run: python fetch_opensky_states.py
+
+      - name: Commit if changed
+        run: |
+          git config user.name  'firestorm-bot'
+          git config user.email 'firestorm-bot@users.noreply.github.com'
+          git add data/opensky_states.json
+          if git diff --cached --quiet; then
+            echo 'No changes, skipping commit'
+          else
+            git commit -m "opensky states $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            git push
+          fi

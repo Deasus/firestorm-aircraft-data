@@ -1,0 +1,58 @@
+name: Update OpenSky History
+
+# Cron: once daily at 04:00 UTC (mid-fire-day Pacific). Scrapes OpenSky
+# /flights/all in 1-hour windows for the trailing 24h, filters to DOI
+# fleet aircraft, writes a per-flight history JSON.
+#
+# Cost: 30 credits per 1-hour window × 24 windows = 720 credits/day.
+# Combined with the every-30-min states pipeline (192/day), total
+# OpenSky usage = 912 credits/day = 23% of the 4000 daily budget.
+#
+# Why this is the unique value: most DOI Office of Aviation Services
+# aircraft are LADD/PIA-listed and invisible in live ADS-B feeds. But
+# their flight HISTORY is captured by OpenSky's feeder network. This
+# pipeline answers "did the Boise-based Bell 412 fly today" even when
+# the aircraft isn't currently transmitting.
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: opensky-history
+      cancel-in-progress: false
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Fetch OpenSky history
+        env:
+          OPENSKY_CLIENT_ID:     ${{ secrets.OPENSKY_CLIENT_ID }}
+          OPENSKY_CLIENT_SECRET: ${{ secrets.OPENSKY_CLIENT_SECRET }}
+        run: python fetch_opensky_history.py
+
+      - name: Commit if changed
+        run: |
+          git config user.name  'firestorm-bot'
+          git config user.email 'firestorm-bot@users.noreply.github.com'
+          git add data/aircraft_history.json
+          if git diff --cached --quiet; then
+            echo 'No changes, skipping commit'
+          else
+            git commit -m "opensky history $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            git push
+          fi
