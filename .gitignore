@@ -1,0 +1,10 @@
+# Full FAA index is ~30MB; commit only the DOI subset
+data/faa_index.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+.DS_Store

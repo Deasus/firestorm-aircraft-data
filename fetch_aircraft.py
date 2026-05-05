@@ -95,14 +95,48 @@ HELO_TYPES = [
 ]
 
 
+# ── DOI fleet whitelist ───────────────────────────────────────────────
+# Loaded from data/doi_fleet.json. These N-numbers are pre-classified as
+# 'doi' regardless of callsign / hex prefix, because DOI Office of Aviation
+# Services aircraft are often LADD-listed or PIA-active and won't match
+# the regular fire/military classifier rules.
+def _load_doi_fleet():
+    import os
+    path = os.path.join(os.path.dirname(__file__), 'data', 'doi_fleet.json')
+    if not os.path.exists(path):
+        return set()
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        regs = set()
+        for ac in data.get('aircraft', []):
+            r = (ac.get('reg') or '').strip().upper()
+            if r:
+                regs.add(r)
+        print(f'[DOI] loaded {len(regs)} fleet registrations')
+        return regs
+    except Exception as e:
+        print(f'[DOI] fleet load failed: {e}')
+        return set()
+
+
+DOI_FLEET_REGS = _load_doi_fleet()
+
+
 def classify(ac: dict) -> str:
-    """Return one of: 'fire', 'medevac', 'military', 'helo', 'civilian'."""
+    """Return one of: 'doi', 'fire', 'medevac', 'military', 'helo', 'civilian'.
+    DOI is checked FIRST so federal land-management aircraft are flagged
+    even if their callsign would otherwise classify as civilian/fire."""
     hex_id = (ac.get('hex') or '').lower()
     reg = (ac.get('r') or '').upper()
     type_code = (ac.get('t') or '').upper()
     callsign = (ac.get('flight') or '').strip().upper()
     cat = (ac.get('category') or '').upper()
     squawk = (ac.get('squawk') or '').strip()
+
+    # DOI fleet — registration whitelist takes precedence
+    if reg and reg in DOI_FLEET_REGS:
+        return 'doi'
 
     # FIRE — callsign prefix or reg hint
     for pfx in FIRE_CALL_PREFIX:
@@ -219,7 +253,7 @@ def main() -> int:
     elapsed = time.time() - start
 
     # Summary counts per our category
-    cat_counts = {'fire': 0, 'military': 0, 'medevac': 0, 'helo': 0, 'civilian': 0}
+    cat_counts = {'doi': 0, 'fire': 0, 'military': 0, 'medevac': 0, 'helo': 0, 'civilian': 0}
     for entry in registry.values():
         cat_counts[entry['_category']] = cat_counts.get(entry['_category'], 0) + 1
 

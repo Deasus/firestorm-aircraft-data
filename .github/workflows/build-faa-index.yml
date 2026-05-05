@@ -1,0 +1,42 @@
+name: Build FAA Aircraft Index
+
+# Manual trigger only. Source ZIP is ~150MB and the parsed JSON is ~30MB —
+# we don't want to run this every cycle. Run when:
+#   1. DOI fleet roster changes (commit triggers another way)
+#   2. FAA publishes their monthly update (around the 1st of each month)
+#
+# Output:
+#   - data/faa_index_doi_only.json       (small, committed)
+#   - data/faa_index.json                (huge, gitignored unless we add LFS)
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 5 AM UTC on the 5th of each month — FAA usually has new data by then
+    - cron: '0 5 5 * *'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - run: python build_faa_index.py
+      - name: Commit DOI-only subset (full index is gitignored)
+        run: |
+          git config user.name  'firestorm-bot'
+          git config user.email 'firestorm-bot@users.noreply.github.com'
+          git add data/faa_index_doi_only.json
+          if git diff --cached --quiet; then
+            echo 'No changes, skipping commit'
+          else
+            git commit -m "FAA index: DOI subset refresh $(date -u +%Y-%m-%d)"
+            git push
+          fi
