@@ -50,17 +50,33 @@ CLIENT_SECRET = os.environ.get('OPENSKY_CLIENT_SECRET', '').strip()
 
 
 def get_token() -> str:
-    """OAuth2 client_credentials. Token lifetime is 1800s; we never cache
-    across runs, just within a single invocation."""
+    """OAuth2 client_credentials with retry-on-timeout. Token lifetime is
+    1800s; we never cache across runs, just within a single invocation.
+
+    GHA runners occasionally cold-start with slow DNS / TLS handshake to
+    auth.opensky-network.org. 15s connect timeout has been observed
+    failing; bumped to 45s with 3 retries on transient errors.
+    """
     if not CLIENT_ID or not CLIENT_SECRET:
         raise RuntimeError('OPENSKY_CLIENT_ID/OPENSKY_CLIENT_SECRET not set in env')
-    r = requests.post(OPENSKY_TOKEN_URL, data={
-        'grant_type':    'client_credentials',
-        'client_id':     CLIENT_ID,
-        'client_secret': CLIENT_SECRET,
-    }, timeout=15)
-    r.raise_for_status()
-    return r.json()['access_token']
+    last_err = None
+    for attempt in range(3):
+        try:
+            r = requests.post(OPENSKY_TOKEN_URL, data={
+                'grant_type':    'client_credentials',
+                'client_id':     CLIENT_ID,
+                'client_secret': CLIENT_SECRET,
+            }, timeout=(45, 30))   # (connect, read)
+            r.raise_for_status()
+            return r.json()['access_token']
+        except (requests.exceptions.ConnectTimeout,
+                requests.exceptions.ReadTimeout,
+                requests.exceptions.ConnectionError) as e:
+            last_err = e
+            wait = (attempt + 1) * 10
+            print(f'[auth] attempt {attempt+1} failed ({type(e).__name__}); retry in {wait}s', flush=True)
+            time.sleep(wait)
+    raise RuntimeError(f'OAuth2 token fetch failed after 3 attempts: {last_err}')
 
 
 def load_doi_hex_map() -> dict[str, dict]:
@@ -102,10 +118,30 @@ def doi_callsigns_set() -> set[str]:
     return out
 
 
+# Mutable container so fetch_window can track latest remaining credits.
+# Treated as state-of-last-call; main() reads at end for the credit log.
+_credit_state = {'remaining': '?', 'spent': 0, 'aborted': False}
+
+
 def fetch_window(token: str, begin: int, end: int) -> list[dict]:
-    """Fetch one 1-hour /flights/all window."""
+    """Fetch one 1-hour /flights/all window. Aborts the whole scrape if the
+    remaining-credits header drops below the safety floor (300 — leaves
+    headroom for next-day states polling + ad-hoc lookups)."""
+    # Pre-flight floor check: don't even issue the request if last response
+    # said we're already under floor.
+    try:
+        if int(_credit_state['remaining']) < 300:
+            print(f'  [history ABORT] credits remaining {_credit_state["remaining"]} below 300 floor', flush=True)
+            _credit_state['aborted'] = True
+            return []
+    except (ValueError, TypeError):
+        pass
     url = f'{OPENSKY_API_BASE}/flights/all?begin={begin}&end={end}'
     r = requests.get(url, headers={'Authorization': f'Bearer {token}'}, timeout=30)
+    rem = r.headers.get('x-rate-limit-remaining', '?')
+    if rem != '?':
+        _credit_state['remaining'] = rem
+        _credit_state['spent'] += 30
     if r.status_code == 404:
         # OpenSky returns 404 when no flights in window — treat as empty
         return []
@@ -116,7 +152,6 @@ def fetch_window(token: str, begin: int, end: int) -> list[dict]:
     if r.status_code >= 400:
         print(f'  [history] HTTP {r.status_code}', flush=True)
         return []
-    rem = r.headers.get('x-rate-limit-remaining', '?')
     data = r.json() or []
     print(f'  [history] {begin}..{end}: {len(data)} flights | credits remaining: {rem}', flush=True)
     return data
@@ -186,7 +221,32 @@ def main() -> int:
         json.dump(output, f, separators=(',', ':'))
 
     print(f'\n[write] {out_path}: {len(all_flights)} DOI flights in last {TOTAL_HOURS}h')
+    status = 'floor_abort' if _credit_state['aborted'] else 'ok'
+    _write_credit_log('opensky_history', _credit_state['remaining'], _credit_state['spent'], status)
     return 0
+
+
+def _write_credit_log(source: str, remaining, spent: int, status: str):
+    """See fetch_opensky_states.py — same shape, shared file."""
+    log_path = os.path.join('data', 'credit_log.json')
+    try:
+        with open(log_path) as f:
+            log = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        log = {'entries': []}
+    log['entries'].append({
+        'ts':        datetime.now(timezone.utc).isoformat(timespec='seconds'),
+        'source':    source,
+        'remaining': remaining,
+        'spent':     spent,
+        'status':    status,
+    })
+    log['entries'] = log['entries'][-200:]
+    log['updated_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    log['daily_budget'] = 4000
+    log['latest_remaining'] = remaining
+    with open(log_path, 'w') as f:
+        json.dump(log, f, separators=(',', ':'))
 
 
 if __name__ == '__main__':
