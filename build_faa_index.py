@@ -100,12 +100,19 @@ def parse_master(zip_bytes: bytes) -> list[dict]:
             text = f.read().decode('latin-1')
     rows = []
     reader = csv.DictReader(io.StringIO(text))
+    # FAA MASTER.txt has trailing spaces in column headers ("N-NUMBER   ").
+    # Build a normalized fieldname map so KEEP_FIELDS lookup works.
+    fieldnames = reader.fieldnames or []
+    norm_map = {fn.strip().upper(): fn for fn in fieldnames}
     for row in reader:
         slim = {}
         for src_field, dest_field in KEEP_FIELDS.items():
             if dest_field is None:
                 continue
-            v = (row.get(src_field) or '').strip()
+            actual_key = norm_map.get(src_field.strip().upper())
+            if actual_key is None:
+                continue
+            v = (row.get(actual_key) or '').strip()
             if v:
                 slim[dest_field] = v
         if slim.get('reg'):
