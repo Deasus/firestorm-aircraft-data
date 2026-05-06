@@ -67,7 +67,18 @@ REGIONS = [
     ('MiddleEast',    28.0,   50.0, 500),
 ]
 
-PRIMARY = 'https://api.airplanes.live/v2/point'
+# 2026-05-06 — ADSBx Enterprise API now the primary source. Two big wins:
+#   1. One /v2/all call returns the global firehose (~14K aircraft) in <2s.
+#      Replaces the 24-region sweep. Pipeline cycle drops from ~45s to ~5s.
+#   2. ADSBx does NOT honor LADD/PIA filtering. DOI + contracted fleet
+#      aircraft become visible in real time — the unique gap that motivated
+#      OpenSky-history is largely closed for live data.
+# airplanes.live regional sweep is kept as failover. adsb.lol as second-tier.
+ADSBX_API_KEY = os.environ.get('ADSBX_API_KEY', '').strip()
+ADSBX_ALL_URL = 'https://adsbexchange.com/api/aircraft/v2/all/'
+ADSBX_REG_URL = 'https://adsbexchange.com/api/aircraft/v2/registration/{regs}/'
+
+PRIMARY = 'https://api.airplanes.live/v2/point'    # failover only now
 FAILOVER = 'https://api.adsb.lol/v2/point'
 # Delay between regional polls — spreads load, avoids burst-rate-limit.
 # Total 21 × 1.5s = ~32s per full cycle; GHA cron is min interval 1min so fine.
@@ -246,6 +257,47 @@ def classify(ac: dict) -> str:
 
 
 # ── Fetching ──────────────────────────────────────────────────────────
+def fetch_adsbx_all(session: requests.Session) -> list[dict] | None:
+    """One-shot global firehose from ADSBx Enterprise. Returns None on any
+    failure so the caller can fall back to the regional airplanes.live sweep."""
+    if not ADSBX_API_KEY:
+        print('[ADSBX] no key — skipping primary, will fall back to airplanes.live')
+        return None
+    try:
+        r = session.get(ADSBX_ALL_URL, timeout=45,
+                        headers={'x-api-key': ADSBX_API_KEY})
+        r.raise_for_status()
+        data = r.json()
+        ac = data.get('ac') or []
+        print(f'[ADSBX] /v2/all returned {len(ac)} aircraft')
+        return ac
+    except Exception as e:
+        print(f'[ADSBX] firehose failed: {e}')
+        return None
+
+
+def fetch_adsbx_fleet(session: requests.Session, regs: list[str]) -> list[dict]:
+    """Direct registration-batch query for our 79 DOI + 78 contracted tails.
+    URLs cap around 8KB; ADSBx accepts comma-separated lists. We chunk at
+    80 regs per call to stay well under that."""
+    if not ADSBX_API_KEY or not regs:
+        return []
+    out = []
+    for i in range(0, len(regs), 80):
+        chunk = regs[i:i+80]
+        url = ADSBX_REG_URL.format(regs=','.join(chunk))
+        try:
+            r = session.get(url, timeout=20,
+                            headers={'x-api-key': ADSBX_API_KEY})
+            r.raise_for_status()
+            ac = (r.json() or {}).get('ac') or []
+            out.extend(ac)
+        except Exception as e:
+            print(f'  [ADSBX fleet chunk {i}] failed: {e}')
+    print(f'[ADSBX] fleet batch returned {len(out)} active tails')
+    return out
+
+
 def fetch_region(name: str, lat: float, lng: float, radius: int, session: requests.Session) -> list[dict]:
     """Fetch a single region. Falls back to adsb.lol if airplanes.live returns 429/5xx."""
     for base, label in [(PRIMARY, 'primary'), (FAILOVER, 'failover')]:
@@ -289,6 +341,104 @@ def main() -> int:
     region_counts: dict[str, int] = {}
     start = time.time()
 
+    # PRIMARY: ADSBx /v2/all firehose. One call, ~14K aircraft, LADD/PIA-immune.
+    adsbx_ac = fetch_adsbx_all(session)
+    source_used = 'adsbx' if adsbx_ac is not None else 'airplanes.live'
+
+    if adsbx_ac is not None:
+        for ac in adsbx_ac:
+            hex_id = (ac.get('hex') or '').lower()
+            if not hex_id or ac.get('lat') is None or ac.get('lon') is None:
+                continue
+            registry[hex_id] = {
+                'hex':      hex_id,
+                'flight':   (ac.get('flight') or '').strip(),
+                'r':        ac.get('r') or '',
+                't':        ac.get('t') or '',
+                'category': ac.get('category') or '',
+                'lat':      ac.get('lat'),
+                'lon':      ac.get('lon'),
+                'alt_baro': ac.get('alt_baro'),
+                'alt_geom': ac.get('alt_geom'),
+                'gs':       ac.get('gs'),
+                'track':    ac.get('track'),
+                'squawk':   ac.get('squawk'),
+                'emergency': ac.get('emergency') or 'none',
+                'ownOp':    ac.get('ownOp') or '',
+                'year':     ac.get('year') or '',
+                '_category': classify(ac),
+                '_sourceRegion': 'ADSBX-global',
+            }
+        region_counts['ADSBX-global'] = len(registry)
+
+        # SUPPLEMENT: explicit fleet batch — catches any tails the firehose
+        # filtering or airbornness may have missed. Same call shape, different
+        # endpoint; results merged into the same registry.
+        fleet_regs = list(DOI_FLEET_REGS) + list(CONTRACTED_FLEET_REGS)
+        fleet_ac = fetch_adsbx_fleet(session, fleet_regs)
+        added_from_batch = 0
+        for ac in fleet_ac:
+            hex_id = (ac.get('hex') or '').lower()
+            if not hex_id or ac.get('lat') is None or ac.get('lon') is None:
+                continue
+            if hex_id in registry:
+                continue   # firehose already had it
+            registry[hex_id] = {
+                'hex':      hex_id,
+                'flight':   (ac.get('flight') or '').strip(),
+                'r':        ac.get('r') or '',
+                't':        ac.get('t') or '',
+                'category': ac.get('category') or '',
+                'lat':      ac.get('lat'),
+                'lon':      ac.get('lon'),
+                'alt_baro': ac.get('alt_baro'),
+                'alt_geom': ac.get('alt_geom'),
+                'gs':       ac.get('gs'),
+                'track':    ac.get('track'),
+                'squawk':   ac.get('squawk'),
+                'emergency': ac.get('emergency') or 'none',
+                'ownOp':    ac.get('ownOp') or '',
+                'year':     ac.get('year') or '',
+                '_category': classify(ac),
+                '_sourceRegion': 'ADSBX-fleet',
+            }
+            added_from_batch += 1
+        region_counts['ADSBX-fleet-batch'] = added_from_batch
+
+        # Skip the legacy regional sweep — ADSBx gave us global coverage already.
+        elapsed = time.time() - start
+        cat_counts = {'doi': 0, 'contracted': 0, 'fire': 0, 'military': 0, 'medevac': 0, 'helo': 0, 'civilian': 0}
+        for entry in registry.values():
+            cat_counts[entry['_category']] = cat_counts.get(entry['_category'], 0) + 1
+
+        output = {
+            'generated_at':    datetime.now(timezone.utc).isoformat(timespec='seconds'),
+            'schema_version':  2,
+            'source':          source_used,
+            'total':           len(registry),
+            'counts':          cat_counts,
+            'regions':         region_counts,
+            'elapsed_sec':     round(elapsed, 1),
+            'aircraft':        list(registry.values()),
+        }
+        os.makedirs('data', exist_ok=True)
+        with open('data/aircraft.json', 'w') as f:
+            json.dump(output, f, separators=(',', ':'))
+        priority = [a for a in registry.values() if a['_category'] != 'civilian']
+        with open('data/aircraft-priority.json', 'w') as f:
+            json.dump({**output, 'aircraft': priority, 'total': len(priority)}, f, separators=(',', ':'))
+        sz = os.path.getsize('data/aircraft.json') / 1024
+        sz_p = os.path.getsize('data/aircraft-priority.json') / 1024
+        print()
+        print(f'Total aircraft: {len(registry)}')
+        print(f'By category:    {cat_counts}')
+        print(f'Elapsed:        {round(elapsed,1)}s')
+        print(f'Output:         data/aircraft.json ({sz:.1f} KB)')
+        print(f'Priority-only:  data/aircraft-priority.json ({len(priority)} aircraft, {sz_p:.1f} KB)')
+        return 0
+
+    # FAILOVER PATH: legacy 24-region airplanes.live + adsb.lol sweep.
+    print('[FAILOVER] ADSBx unavailable, falling back to regional sweep')
     for name, lat, lng, radius in REGIONS:
         ac_list = fetch_region(name, lat, lng, radius, session)
         region_counts[name] = len(ac_list)

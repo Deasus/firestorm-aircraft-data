@@ -43,6 +43,8 @@ jobs:
         run: pip install requests
 
       - name: Fetch aircraft
+        env:
+          ADSBX_API_KEY: ${{ secrets.ADSBX_API_KEY }}
         run: python fetch_aircraft.py
 
       - name: Commit if changed
