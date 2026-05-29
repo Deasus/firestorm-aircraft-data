@@ -80,9 +80,16 @@ ADSBX_REG_URL = 'https://adsbexchange.com/api/aircraft/v2/registration/{regs}/'
 
 PRIMARY = 'https://api.airplanes.live/v2/point'    # failover only now
 FAILOVER = 'https://api.adsb.lol/v2/point'
-# Delay between regional polls — spreads load, avoids burst-rate-limit.
-# Total 21 × 1.5s = ~32s per full cycle; GHA cron is min interval 1min so fine.
-INTER_POLL_DELAY = 1.5
+INTER_POLL_DELAY = 0.5
+
+# 2026-05-29 hardening: ADSBx 402'd today, the legacy regional sweep ran
+# without a global cap, and the GHA job timed out (3 min) mid-loop with
+# zero output committed. Two layers of defense: tight per-call timeouts so
+# any single slow upstream can't burn the budget, and a global deadline so
+# we always commit *something* even if upstreams degrade.
+ADSBX_TIMEOUT_SEC   = 15
+REGION_TIMEOUT_SEC  = 8
+SCRIPT_DEADLINE_SEC = 150
 
 HEADERS = {
     'User-Agent': 'FIRESTORM-aircraft-pipeline/1.0 (https://github.com/Deasus/firestorm-aircraft-data)',
@@ -264,7 +271,7 @@ def fetch_adsbx_all(session: requests.Session) -> list[dict] | None:
         print('[ADSBX] no key — skipping primary, will fall back to airplanes.live')
         return None
     try:
-        r = session.get(ADSBX_ALL_URL, timeout=45,
+        r = session.get(ADSBX_ALL_URL, timeout=ADSBX_TIMEOUT_SEC,
                         headers={'x-api-key': ADSBX_API_KEY})
         r.raise_for_status()
         data = r.json()
@@ -298,18 +305,26 @@ def fetch_adsbx_fleet(session: requests.Session, regs: list[str]) -> list[dict]:
     return out
 
 
+# 2026-05-29: per-endpoint cool-down. If an upstream times out or 5xxs once
+# in a run, skip it for the remaining regions instead of burning 8s × N more.
+# Reset between runs (module-scope state, fresh per cron invocation).
+_dead_endpoints: set[str] = set()
+
 def fetch_region(name: str, lat: float, lng: float, radius: int, session: requests.Session) -> list[dict]:
     """Fetch a single region. Falls back to adsb.lol if airplanes.live returns 429/5xx."""
     for base, label in [(PRIMARY, 'primary'), (FAILOVER, 'failover')]:
+        if label in _dead_endpoints:
+            continue
         url = f'{base}/{lat}/{lng}/{radius}'
         try:
-            r = session.get(url, timeout=15)
+            r = session.get(url, timeout=REGION_TIMEOUT_SEC)
             if r.status_code == 429:
-                print(f'  [{name}] {label} rate limited, sleeping 3s and trying failover…')
-                time.sleep(3)
+                print(f'  [{name}] {label} rate limited, marking dead for this run')
+                _dead_endpoints.add(label)
                 continue
             if r.status_code >= 500:
-                print(f'  [{name}] {label} HTTP {r.status_code}, trying failover…')
+                print(f'  [{name}] {label} HTTP {r.status_code}, marking dead for this run')
+                _dead_endpoints.add(label)
                 continue
             r.raise_for_status()
             data = r.json()
@@ -317,7 +332,8 @@ def fetch_region(name: str, lat: float, lng: float, radius: int, session: reques
             print(f'  [{name}] {len(ac)} aircraft (via {label})')
             return ac
         except requests.exceptions.Timeout:
-            print(f'  [{name}] {label} timeout')
+            print(f'  [{name}] {label} timeout, marking dead for this run')
+            _dead_endpoints.add(label)
             continue
         except Exception as e:
             print(f'  [{name}] {label} failed: {e}')
@@ -440,6 +456,16 @@ def main() -> int:
     # FAILOVER PATH: legacy 24-region airplanes.live + adsb.lol sweep.
     print('[FAILOVER] ADSBx unavailable, falling back to regional sweep')
     for name, lat, lng, radius in REGIONS:
+        # 2026-05-29: watchdog — if both endpoints have died, no point looping;
+        # likewise stop if we're past the global deadline. Either case writes
+        # what we have so far so the JSON freshness chip stays accurate.
+        if {'primary', 'failover'} <= _dead_endpoints:
+            print('[WATCHDOG] both upstreams dead, ending sweep early')
+            break
+        if time.time() - start > SCRIPT_DEADLINE_SEC:
+            print(f'[WATCHDOG] over {SCRIPT_DEADLINE_SEC}s, ending sweep early '
+                  f'with {len(registry)} aircraft so far')
+            break
         ac_list = fetch_region(name, lat, lng, radius, session)
         region_counts[name] = len(ac_list)
 
