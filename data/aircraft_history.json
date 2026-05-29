@@ -1,1 +1,1 @@
-{"generated_at":"2026-05-28T08:05:29+00:00","window_hours":24,"source":"OpenSky Network /flights/all","doi_count":0,"flights":[]}
+{"generated_at":"2026-05-29T08:02:12+00:00","window_hours":24,"source":"OpenSky Network /flights/all","doi_count":1,"flights":[{"icao24":"a16975","callsign":"N190PE","reg":"N190PE","base":null,"type":null,"dep":"PAFB","arr":null,"firstSeen":1779996246,"lastSeen":1779998667,"duration_s":2421}]}
