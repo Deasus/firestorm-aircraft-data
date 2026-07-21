@@ -1,1 +1,1 @@
-{"generated_at":"2026-07-14T06:13:56+00:00","window_hours":24,"source":"OpenSky Network /flights/all","doi_count":0,"flights":[]}
+{"generated_at":"2026-07-21T06:31:59+00:00","window_hours":24,"source":"OpenSky Network /flights/all","doi_count":1,"flights":[{"icao24":"a95bfb","callsign":"N702","reg":"N702","base":null,"type":null,"dep":"KBJC","arr":"CO86","firstSeen":1784557419,"lastSeen":1784558740,"duration_s":1321}]}
