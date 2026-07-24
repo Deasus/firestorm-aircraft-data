@@ -1,1 +1,1 @@
-{"generated_at":"2026-07-23T06:33:31+00:00","window_hours":24,"source":"OpenSky Network /flights/all","doi_count":1,"flights":[{"icao24":"a02b2d","callsign":"N11PP","reg":"N11PP","base":"Washington, DC","type":"Bell 412","dep":"KDCA","arr":"KDCA","firstSeen":1784725750,"lastSeen":1784726346,"duration_s":596}]}
+{"generated_at":"2026-07-24T06:29:10+00:00","window_hours":24,"source":"OpenSky Network /flights/all","doi_count":0,"flights":[]}
