@@ -1,1 +1,1 @@
-{"generated_at":"2026-07-29T06:34:48+00:00","window_hours":24,"source":"OpenSky Network /flights/all","doi_count":0,"flights":[]}
+{"generated_at":"2026-07-30T06:31:56+00:00","window_hours":24,"source":"OpenSky Network /flights/all","doi_count":1,"flights":[{"icao24":"aa7ebe","callsign":"N77554","reg":"N77554","base":null,"type":null,"dep":"PANC","arr":"PANC","firstSeen":1785372531,"lastSeen":1785372577,"duration_s":46}]}
