@@ -1,6 +1,6 @@
 # firestorm-aircraft-data
 
-Live ADS-B aircraft feed for [FIRESTORM](https://github.com/Deasus/Firestorm).
+Live ADS-B aircraft feed for [FIRESTORM](https://github.com/Deasus/firestorm-platform).
 
 Polls [airplanes.live](https://airplanes.live) (primary) with [adsb.lol](https://adsb.lol) failover from 21 global regions, merges by ICAO hex, classifies each aircraft into fire/military/medevac/helo/civilian, and publishes a single JSON via GitHub Pages / raw.githubusercontent.com so the FIRESTORM frontend can fetch without getting rate-limited.
 
