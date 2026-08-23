@@ -1,1 +1,1 @@
-{"generated_at":"2026-08-22T04:35:55+00:00","window_hours":24,"source":"OpenSky Network /flights/all","doi_count":0,"flights":[]}
+{"generated_at":"2026-08-23T04:40:47+00:00","window_hours":24,"source":"OpenSky Network /flights/all","doi_count":1,"flights":[{"icao24":"a0f9b5","callsign":"N162GC","reg":"N162GC","base":null,"type":null,"dep":"KGEG","arr":"WA15","firstSeen":1787430111,"lastSeen":1787431938,"duration_s":1827}]}
