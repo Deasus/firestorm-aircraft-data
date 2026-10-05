@@ -38,5 +38,10 @@ jobs:
             echo 'No changes, skipping commit'
           else
             git commit -m "FAA index: DOI subset refresh $(date -u +%Y-%m-%d)"
-            git push
+            # 2026-10-05: race-safe; the aircraft chain now commits every 5 min
+            for attempt in 1 2 3 4; do
+              if git push; then echo "push ok (attempt $attempt)"; break; fi
+              echo "push rejected (attempt $attempt): another workflow committed first; rebasing"
+              git pull --rebase --autostash origin main || { git rebase --abort; sleep 3; }
+            done
           fi

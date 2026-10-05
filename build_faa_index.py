@@ -97,13 +97,20 @@ def parse_master(zip_bytes: bytes) -> list[dict]:
         if not name:
             raise RuntimeError(f'MASTER.txt not in zip; contents: {zf.namelist()}')
         with zf.open(name) as f:
-            text = f.read().decode('latin-1')
+            raw = f.read()
+        # 2026-10-05 — MASTER.txt starts with a UTF-8 byte-order mark. Decoded as latin-1 it
+        # became 'ï»¿' glued to the first header ('ï»¿N-NUMBER'), so the N-NUMBER lookup
+        # failed on every row: "parsed 0 valid records" on every monthly run since 2026-05-06,
+        # while the workflow reported success.
+        if raw.startswith(b'\xef\xbb\xbf'):
+            raw = raw[3:]
+        text = raw.decode('latin-1')
     rows = []
     reader = csv.DictReader(io.StringIO(text))
     # FAA MASTER.txt has trailing spaces in column headers ("N-NUMBER   ").
     # Build a normalized fieldname map so KEEP_FIELDS lookup works.
     fieldnames = reader.fieldnames or []
-    norm_map = {fn.strip().upper(): fn for fn in fieldnames}
+    norm_map = {fn.strip().lstrip('\ufeff').upper(): fn for fn in fieldnames}
     for row in reader:
         slim = {}
         for src_field, dest_field in KEEP_FIELDS.items():

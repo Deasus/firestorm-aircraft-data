@@ -78,8 +78,13 @@ ADSBX_API_KEY = os.environ.get('ADSBX_API_KEY', '').strip()
 ADSBX_ALL_URL = 'https://adsbexchange.com/api/aircraft/v2/all/'
 ADSBX_REG_URL = 'https://adsbexchange.com/api/aircraft/v2/registration/{regs}/'
 
-PRIMARY = 'https://api.airplanes.live/v2/point'    # failover only now
-FAILOVER = 'https://api.adsb.lol/v2/point'
+# 2026-10-05 — airplanes.live has refused us with 403 ("contact us") on every endpoint since
+# at least 2026-08-24, so every region spent a request on it before falling over. The sweep
+# now uses the two community feeds that answer: adsb.lol primary, adsb.fi failover (adsb.fi
+# v3 caps radius at 250 nm, so its failover sweep covers less).
+PRIMARY = 'https://api.adsb.lol/v2/point'            # /{lat}/{lng}/{radius}
+FAILOVER = 'https://opendata.adsb.fi/api/v3'         # /lat/{lat}/lon/{lng}/dist/{<=250}
+ADSB_FI_MAX_NM = 250
 INTER_POLL_DELAY = 0.5
 
 # 2026-05-29 hardening: ADSBx 402'd today, the legacy regional sweep ran
@@ -266,9 +271,9 @@ def classify(ac: dict) -> str:
 # ── Fetching ──────────────────────────────────────────────────────────
 def fetch_adsbx_all(session: requests.Session) -> list[dict] | None:
     """One-shot global firehose from ADSBx Enterprise. Returns None on any
-    failure so the caller can fall back to the regional airplanes.live sweep."""
+    failure so the caller can fall back to the regional adsb.lol / adsb.fi sweep."""
     if not ADSBX_API_KEY:
-        print('[ADSBX] no key — skipping primary, will fall back to airplanes.live')
+        print('[ADSBX] no key — skipping primary, will fall back to the adsb.lol / adsb.fi sweep')
         return None
     try:
         r = session.get(ADSBX_ALL_URL, timeout=ADSBX_TIMEOUT_SEC,
@@ -309,17 +314,44 @@ def fetch_adsbx_fleet(session: requests.Session, regs: list[str]) -> list[dict]:
 # in a run, skip it for the remaining regions instead of burning 8s × N more.
 # Reset between runs (module-scope state, fresh per cron invocation).
 _dead_endpoints: set[str] = set()
+# 2026-10-05 — adsb.lol answered 429 after 3 back-to-back region calls, and the other 21
+# regions fell to adsb.fi's smaller 250 nm radius (Alaska 33 aircraft). Pace each endpoint,
+# and on a 429 honour Retry-After once before giving the endpoint up for the run.
+_MIN_GAP_SEC = 1.2
+_last_call: dict[str, float] = {}
+_RATE_COOLDOWN_SEC = 30          # a rate-limited endpoint comes back after this, not never
+_cooling_until: dict[str, float] = {}
 
 def fetch_region(name: str, lat: float, lng: float, radius: int, session: requests.Session) -> list[dict]:
-    """Fetch a single region. Falls back to adsb.lol if airplanes.live returns 429/5xx."""
+    """Fetch a single region from adsb.lol, falling back to adsb.fi."""
     for base, label in [(PRIMARY, 'primary'), (FAILOVER, 'failover')]:
-        if label in _dead_endpoints:
+        if label in _dead_endpoints or time.time() < _cooling_until.get(label, 0):
             continue
-        url = f'{base}/{lat}/{lng}/{radius}'
+        if base == FAILOVER:
+            url = f'{base}/lat/{lat}/lon/{lng}/dist/{min(radius, ADSB_FI_MAX_NM)}'
+        else:
+            url = f'{base}/{lat}/{lng}/{radius}'
         try:
+            wait = _MIN_GAP_SEC - (time.time() - _last_call.get(label, 0))
+            if wait > 0:
+                time.sleep(wait)
+            _last_call[label] = time.time()
             r = session.get(url, timeout=REGION_TIMEOUT_SEC)
             if r.status_code == 429:
-                print(f'  [{name}] {label} rate limited, marking dead for this run')
+                try:
+                    back = min(float(r.headers.get('Retry-After') or 5), 10)
+                except ValueError:
+                    back = 5
+                print(f'  [{name}] {label} rate limited, retrying once in {back:.0f}s')
+                time.sleep(back)
+                _last_call[label] = time.time()
+                r = session.get(url, timeout=REGION_TIMEOUT_SEC)
+            if r.status_code == 429:
+                print(f'  [{name}] {label} still rate limited, cooling down {_RATE_COOLDOWN_SEC}s')
+                _cooling_until[label] = time.time() + _RATE_COOLDOWN_SEC
+                continue
+            if r.status_code in (401, 402, 403):   # a policy refusal: don't retry it per region
+                print(f'  [{name}] {label} HTTP {r.status_code}, marking dead for this run')
                 _dead_endpoints.add(label)
                 continue
             if r.status_code >= 500:
@@ -359,7 +391,7 @@ def main() -> int:
 
     # PRIMARY: ADSBx /v2/all firehose. One call, ~14K aircraft, LADD/PIA-immune.
     adsbx_ac = fetch_adsbx_all(session)
-    source_used = 'adsbx' if adsbx_ac is not None else 'airplanes.live'
+    source_used = 'adsbx' if adsbx_ac is not None else 'adsb.lol'
 
     if adsbx_ac is not None:
         for ac in adsbx_ac:
@@ -453,7 +485,7 @@ def main() -> int:
         print(f'Priority-only:  data/aircraft-priority.json ({len(priority)} aircraft, {sz_p:.1f} KB)')
         return 0
 
-    # FAILOVER PATH: legacy 24-region airplanes.live + adsb.lol sweep.
+    # FAILOVER PATH: regional adsb.lol + adsb.fi sweep (airplanes.live dropped 2026-10-05).
     print('[FAILOVER] ADSBx unavailable, falling back to regional sweep')
     for name, lat, lng, radius in REGIONS:
         # 2026-05-29: watchdog — if both endpoints have died, no point looping;

@@ -1,28 +1,38 @@
 name: Update OpenSky States
 
-# Cron: every 30 minutes. OpenSky /states/all costs 4 credits per call.
-# 48 calls/day = 192 credits/day = 5% of the 4000-credit daily budget.
-# Output is a global state-vector snapshot the frontend can merge with
-# airplanes.live data to widen coverage (OpenSky has ~5K feeders vs
-# airplanes.live's ~3K — measurable gain in EU + Asia).
-
+# CADENCE (2026-10-05): a self-re-dispatching chain, the pattern firestorm-goes-fire-data
+# proved. GitHub's `schedule` is best-effort: measured 2026-10-05, this repo's */5 and */30
+# crons ran only ~5-6 times a day. Each run queues its successor FIRST (the concurrency group
+# holds it until this run ends, so a failed or cancelled run cannot break the chain), does its
+# work, then waits out the rest of a 30-min slot. The cron is now only a dead-man restart.
+# OpenSky /states/all costs 4 credits; a 30-min slot = 192 credits/day of the 4,000 shared budget.
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '*/30 * * * *'        # dead-man restart only; the chain sets the cadence
   workflow_dispatch:
 
 permissions:
   contents: write
+  actions: write                 # self re-dispatch
 
 jobs:
   update:
     runs-on: ubuntu-latest
     concurrency:
-      group: opensky-states
+      group: update-opensky-states
       cancel-in-progress: false
-    timeout-minutes: 3
+    timeout-minutes: 40
     steps:
+      - name: mark the slot start
+        run: echo "SLOT_START=$(date +%s)" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
+
+      - name: queue the next run (first, so this run cannot break the chain)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run update-opensky-states.yml --ref main || echo "::warning::re-dispatch failed; the schedule will restart the chain"
 
       - uses: actions/setup-python@v5
         with:
@@ -44,7 +54,17 @@ jobs:
           git add data/opensky_states.json data/credit_log.json
           if git diff --cached --quiet; then
             echo 'No changes, skipping commit'
-          else
-            git commit -m "opensky states $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            git push
+            exit 0
           fi
+          git commit -m "opensky states $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          for attempt in 1 2 3 4; do
+            if git push; then echo "push ok (attempt $attempt)"; break; fi
+            echo "push rejected (attempt $attempt): another workflow committed first; rebasing"
+            git pull --rebase --autostash origin main || { git rebase --abort; sleep 3; }
+          done
+
+      - name: wait out the rest of the 30-min slot
+        if: always()
+        run: |
+          left=$(( 1800 - ($(date +%s) - SLOT_START) ))
+          if [ "$left" -gt 0 ]; then echo "sleeping ${left}s to the next slot"; sleep "$left"; fi
